@@ -183,6 +183,73 @@ def delete_webhook():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+# ============================================
+# NOTIFICATION ENDPOINTS
+# ============================================
+
+@app.route("/api/notifications/pending", methods=["GET"])
+def get_pending_notifications():
+    """Get all pending notifications for debugging."""
+    priority = request.args.get("priority")
+    channel = request.args.get("channel")
+
+    pending = db.get_pending_notifications(priority=priority, channel=channel)
+
+    return jsonify({
+        "ok": True,
+        "count": len(pending),
+        "notifications": pending
+    })
+
+
+@app.route("/api/notifications/send", methods=["POST"])
+def trigger_notification_batch():
+    """Manually trigger P1 batch processing."""
+    import notification_router
+
+    count = notification_router.process_pending_batch()
+
+    return jsonify({
+        "ok": True,
+        "sent": count
+    })
+
+
+@app.route("/api/notifications/test", methods=["POST"])
+def test_notification():
+    """Send a test notification (for debugging)."""
+    import notification_router
+
+    data = request.get_json() or {}
+    message = data.get("message", "Test notification from Project Manager")
+    priority = data.get("priority", "P1")
+
+    if priority == "P0":
+        result = notification_router.queue_p0(message, "test", None)
+    elif priority == "P1":
+        result = notification_router.queue_p1(message, "test", None)
+    elif priority == "P2":
+        result = notification_router.queue_p2(message)
+    else:
+        result = {"error": f"Invalid priority: {priority}"}
+
+    return jsonify({"ok": True, "result": result})
+
+
+@app.route("/api/notifications/check-deadlines", methods=["POST"])
+def check_deadlines():
+    """Manually trigger deadline check (for debugging)."""
+    import notification_router
+
+    notifications = notification_router.check_urgent_deadlines()
+
+    return jsonify({
+        "ok": True,
+        "urgent_count": len(notifications),
+        "notifications": notifications
+    })
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 4000))
     logger.info(f"Starting Project Manager Agent on port {port}")

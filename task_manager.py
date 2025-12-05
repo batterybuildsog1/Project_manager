@@ -109,6 +109,7 @@ def add_dependency(
 def start_task_safe(task_id: str) -> Dict[str, Any]:
     """
     Start a task with user-friendly error handling.
+    Sends P1 notification on success.
 
     Returns:
         {
@@ -118,11 +119,27 @@ def start_task_safe(task_id: str) -> Dict[str, Any]:
             "reasons": list of reasons why can't start
         }
     """
+    # Get old status before starting
+    old_task = db.get_task(task_id)
+    old_status = old_task["status"] if old_task else "unknown"
+
     can_start, reasons = toc_engine.can_start_task(task_id)
 
     if can_start:
         try:
             task = toc_engine.start_task(task_id)
+
+            # Send notification
+            try:
+                import notification_router
+                notification_router.notify_task_status_change(
+                    task_id=task_id,
+                    old_status=old_status,
+                    new_status="in_progress"
+                )
+            except Exception:
+                pass  # Don't fail task start if notification fails
+
             return {"success": True, "task": task}
         except Exception as e:
             return {"success": False, "error": str(e), "reasons": [str(e)]}
@@ -131,10 +148,29 @@ def start_task_safe(task_id: str) -> Dict[str, Any]:
 
 
 def complete_task_safe(task_id: str, actual_hours: float = None) -> Dict[str, Any]:
-    """Complete a task with user-friendly response."""
+    """
+    Complete a task with user-friendly response.
+    Sends P1 notification on success.
+    """
+    # Get old status before completing
+    old_task = db.get_task(task_id)
+    old_status = old_task["status"] if old_task else "unknown"
+
     try:
         task = toc_engine.complete_task(task_id, actual_hours)
         unblocked = toc_engine.unblock_dependent_tasks(task_id)
+
+        # Send notification
+        try:
+            import notification_router
+            notification_router.notify_task_status_change(
+                task_id=task_id,
+                old_status=old_status,
+                new_status="completed"
+            )
+        except Exception:
+            pass  # Don't fail task completion if notification fails
+
         return {
             "success": True,
             "task": task,
@@ -145,9 +181,24 @@ def complete_task_safe(task_id: str, actual_hours: float = None) -> Dict[str, An
 
 
 def block_task_safe(task_id: str, reason: str, waiting_on: str = None) -> Dict[str, Any]:
-    """Block a task with user-friendly response."""
+    """
+    Block a task with user-friendly response.
+    Sends P1 notification for new blocker.
+    """
     try:
         blocker = toc_engine.block_task(task_id, reason, waiting_on)
+
+        # Send notification for new blocker
+        try:
+            import notification_router
+            notification_router.notify_new_blocker(
+                blocker_id=blocker["id"],
+                description=reason,
+                waiting_on=waiting_on
+            )
+        except Exception:
+            pass  # Don't fail block if notification fails
+
         return {"success": True, "blocker": blocker}
     except Exception as e:
         return {"success": False, "error": str(e)}

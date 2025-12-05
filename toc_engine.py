@@ -38,9 +38,14 @@ def set_global_wip_limit(limit: int) -> None:
     db.set_state("config", config)
 
 
-def check_wip_limit(project_id: str = None) -> Tuple[int, int, bool]:
+def check_wip_limit(project_id: str = None, notify: bool = True) -> Tuple[int, int, bool]:
     """
     Check current WIP against limit.
+    Optionally sends P1 warning notification when approaching limit.
+
+    Args:
+        project_id: Optional project to scope check
+        notify: If True, send notification when approaching limit
 
     Returns:
         (current_wip, wip_limit, is_within_limit)
@@ -52,6 +57,14 @@ def check_wip_limit(project_id: str = None) -> Tuple[int, int, bool]:
         limit = project.get("wip_limit", DEFAULT_WIP_LIMIT) if project else DEFAULT_WIP_LIMIT
     else:
         limit = get_global_wip_limit()
+
+    # Send notification if approaching limit
+    if notify and current >= limit - 1:
+        try:
+            import notification_router
+            notification_router.notify_wip_warning(current, limit)
+        except Exception:
+            pass  # Don't fail WIP check if notification fails
 
     return current, limit, current < limit
 
@@ -77,8 +90,8 @@ def can_start_task(task_id: str) -> Tuple[bool, List[str]]:
     elif task["status"] == "cancelled":
         reasons.append("Task is cancelled")
 
-    # Check WIP limit
-    current, limit, within = check_wip_limit(task.get("project_id"))
+    # Check WIP limit (don't notify here, task_manager handles notifications)
+    current, limit, within = check_wip_limit(task.get("project_id"), notify=False)
     if not within:
         reasons.append(f"WIP limit reached ({current}/{limit})")
 

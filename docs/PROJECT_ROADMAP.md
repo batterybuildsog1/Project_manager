@@ -8,7 +8,7 @@
 | Spec | Location | Status |
 |------|----------|--------|
 | Memory Management | `docs/MEMORY_MANAGEMENT.md` | **DONE** |
-| Notification System | `docs/NOTIFICATION_SYSTEM.md` | Pending |
+| Notification System | `docs/NOTIFICATION_SYSTEM.md` | **DONE** |
 
 ---
 
@@ -23,7 +23,7 @@
 | 1 | Database Schema | DONE | - | `db.py` |
 | 2 | Task Management | DONE | 1 | `task_manager.py`, `toc_engine.py` |
 | **2.5** | **Memory** | **DONE** | **1** | **`memory_manager.py`** |
-| **3** | **Notifications** | **IN PROGRESS** | **1** | **`notification_router.py`, `config.py`** |
+| 3 | Notifications | **DONE** | 1 | `notification_router.py`, `config.py` |
 | 4 | Email Monitor | Ready | 3 | `email_monitor.py` |
 | 5 | Recurring Tasks | Ready | 2 | Uses existing `db.py` |
 | 6 | Documents/RAG | Ready | 1 | `document_manager.py`, `rag_engine.py` |
@@ -33,14 +33,14 @@
 | **10** | **Dashboard UI** | **Blocked** | **9 (scheduler first!)** | **`static/dashboard.*`** |
 
 ### Parallelizable Groups (UPDATED)
-**Group A** (NOW - no dependencies): 2.5, 3, 5, 6
-**Group B** (after 3 done): 4, 9
+**Group A** (DONE): 2.5, 3
+**Group B** (READY - no dependencies): 4, 5, 6, 9
 **Group C** (after 4, 9 done): 7, 8
 **Group D** (LAST - needs scheduler): 10 (Dashboard)
 
 ### Agent Execution Plan
 
-**EXECUTING: Group A (2 agents in parallel, max)**
+**COMPLETED: Group A**
 
 #### Agent 1: Phase 2.5 - Memory Management ✅ DONE
 ```
@@ -55,12 +55,22 @@ Implementation:
 - Tool-based retrieval for older messages (search_history, get_messages_by_date)
 ```
 
-#### Agent 2: Phase 3 - Notification System
+#### Agent 2: Phase 3 - Notification System ✅ DONE
 ```
-Create: notification_router.py, config.py
-Spec: docs/NOTIFICATION_SYSTEM.md
-Update: server.py (add notification endpoints)
-Key: P0-P3 priorities, batch notifications, Telegram + SMS channels
+COMPLETED:
+- notification_router.py: P0-P3 priority routing, deduplication
+- config.py: Notification settings, batch times
+- server.py: Added /api/notifications/* endpoints
+- task_manager.py: Hooks for task status notifications
+- toc_engine.py: WIP warning notifications
+- db.py: notification_dedup table, helper functions
+
+Implementation:
+- P0 IMMEDIATE: Telegram + SMS (blocker resolved, deadline <24h)
+- P1 BATCHED: Telegram at 9am/1pm/5pm (task status, WIP warnings)
+- P2 WEEKLY: Telegram Sunday 8pm (weekly summary)
+- P3 SILENT: Log only
+- Deduplication: 4h (P0), 8h (P1), 7d (P2) windows
 ```
 
 ---
@@ -425,7 +435,7 @@ Project_manager/
 ├── task_manager.py        # Task/project CRUD (DONE)
 ├── toc_engine.py          # TOC calculations (DONE)
 ├── memory_manager.py      # 60K context + tools (DONE)
-├── notification_router.py # Priority routing (TODO)
+├── notification_router.py # Priority routing (DONE)
 ├── email_monitor.py       # Gmail scanning (TODO)
 ├── autonomous_executor.py # Auto-actions (TODO)
 ├── document_manager.py    # File handling (TODO)
@@ -472,8 +482,8 @@ Project_manager/
 |-------|-------------|------------|-------|--------|
 | 1 | Database schema | - | - | DONE |
 | 2 | Task management | Phase 1 | - | DONE |
-| **2.5** | **Memory management** | **Phase 1** | **A** | **IN PROGRESS** |
-| **3** | **Notification system** | **Phase 1** | **A** | **IN PROGRESS** |
+| **2.5** | **Memory management** | **Phase 1** | **A** | **DONE** |
+| **3** | **Notification system** | **Phase 1** | **A** | **DONE** |
 | 5 | Recurring tasks | Phase 2 | A | Pending |
 | 6 | Document/RAG | Phase 1 | A | Pending |
 | 4 | Email monitoring | Phase 3 | B | Pending |
