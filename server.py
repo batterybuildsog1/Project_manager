@@ -250,6 +250,243 @@ def check_deadlines():
     })
 
 
+# ============================================
+# EMAIL MONITOR ENDPOINTS (Phase 4)
+# ============================================
+
+@app.route("/api/email/scan", methods=["POST"])
+def trigger_email_scan():
+    """
+    Manually trigger an email scan.
+
+    Request body (optional):
+        {"hours": 24}  - How many hours to look back
+
+    Returns:
+        MCP instructions for agent to execute gmail search
+    """
+    import email_monitor
+
+    data = request.get_json() or {}
+    hours = data.get("hours")
+
+    result = email_monitor.run_email_scan(hours)
+
+    return jsonify({
+        "ok": True,
+        "result": result
+    })
+
+
+@app.route("/api/email/status", methods=["GET"])
+def get_email_status():
+    """
+    Get email scan status and configuration.
+
+    Returns:
+        Config and recent scan info
+    """
+    import email_monitor
+
+    status = email_monitor.get_scan_status()
+
+    return jsonify({
+        "ok": True,
+        "status": status
+    })
+
+
+@app.route("/api/email/classify", methods=["POST"])
+def classify_email_endpoint():
+    """
+    Classify a single email (for testing/debugging).
+
+    Request body:
+        {
+            "from": "sender@example.com",
+            "subject": "Email subject",
+            "body": "Email body text",
+            "attachments": [{"id": "att1", "filename": "file.pdf"}]
+        }
+
+    Returns:
+        Classification result
+    """
+    import email_monitor
+
+    data = request.get_json() or {}
+
+    if not data.get("from") and not data.get("subject"):
+        return jsonify({"ok": False, "error": "from or subject required"}), 400
+
+    classification = email_monitor.classify_email(data)
+
+    return jsonify({
+        "ok": True,
+        "classification": classification
+    })
+
+
+# ============================================
+# RECURRING TASKS ENDPOINTS (Phase 5)
+# ============================================
+
+@app.route("/api/recurring", methods=["GET"])
+def list_recurring_schedules():
+    """List all recurring schedules."""
+    import recurring_tasks
+
+    active_only = request.args.get("active_only", "true").lower() == "true"
+    schedules = recurring_tasks.list_schedules(active_only=active_only)
+
+    return jsonify({
+        "ok": True,
+        "count": len(schedules),
+        "schedules": schedules
+    })
+
+
+@app.route("/api/recurring", methods=["POST"])
+def create_recurring_schedule():
+    """Create a new recurring schedule."""
+    import recurring_tasks
+
+    data = request.get_json() or {}
+
+    if not data.get("name") or not data.get("frequency"):
+        return jsonify({"ok": False, "error": "name and frequency required"}), 400
+
+    valid_frequencies = ["daily", "weekly", "biweekly", "monthly", "quarterly", "yearly"]
+    if data["frequency"] not in valid_frequencies:
+        return jsonify({
+            "ok": False,
+            "error": f"Invalid frequency. Must be one of: {', '.join(valid_frequencies)}"
+        }), 400
+
+    schedule = recurring_tasks.create_schedule(
+        name=data["name"],
+        frequency=data["frequency"],
+        task_title_template=data.get("task_title_template"),
+        project_id=data.get("project_id"),
+        description=data.get("description"),
+        day_of_week=data.get("day_of_week"),
+        day_of_month=data.get("day_of_month"),
+        month_of_year=data.get("month_of_year"),
+        task_description_template=data.get("task_description_template"),
+        estimated_hours=data.get("estimated_hours"),
+        start_date=data.get("start_date"),
+        end_date=data.get("end_date")
+    )
+
+    return jsonify({
+        "ok": True,
+        "schedule": schedule
+    })
+
+
+@app.route("/api/recurring/<schedule_id>", methods=["GET"])
+def get_recurring_schedule(schedule_id):
+    """Get a specific recurring schedule."""
+    import recurring_tasks
+
+    schedule = recurring_tasks.get_schedule(schedule_id)
+
+    if not schedule:
+        return jsonify({"ok": False, "error": "Schedule not found"}), 404
+
+    # Include generated tasks
+    tasks = recurring_tasks.get_tasks_for_schedule(schedule_id)
+
+    return jsonify({
+        "ok": True,
+        "schedule": schedule,
+        "generated_tasks": tasks
+    })
+
+
+@app.route("/api/recurring/<schedule_id>", methods=["PUT"])
+def update_recurring_schedule(schedule_id):
+    """Update a recurring schedule."""
+    import recurring_tasks
+
+    data = request.get_json() or {}
+
+    if not data:
+        return jsonify({"ok": False, "error": "No data provided"}), 400
+
+    # Validate frequency if provided
+    if "frequency" in data:
+        valid_frequencies = ["daily", "weekly", "biweekly", "monthly", "quarterly", "yearly"]
+        if data["frequency"] not in valid_frequencies:
+            return jsonify({
+                "ok": False,
+                "error": f"Invalid frequency. Must be one of: {', '.join(valid_frequencies)}"
+            }), 400
+
+    schedule = recurring_tasks.update_schedule(schedule_id, **data)
+
+    if not schedule:
+        return jsonify({"ok": False, "error": "Schedule not found"}), 404
+
+    return jsonify({
+        "ok": True,
+        "schedule": schedule
+    })
+
+
+@app.route("/api/recurring/<schedule_id>", methods=["DELETE"])
+def delete_recurring_schedule(schedule_id):
+    """Deactivate a recurring schedule (soft delete)."""
+    import recurring_tasks
+
+    success = recurring_tasks.deactivate_schedule(schedule_id)
+
+    return jsonify({
+        "ok": success,
+        "message": "Schedule deactivated" if success else "Schedule not found"
+    })
+
+
+@app.route("/api/recurring/<schedule_id>/activate", methods=["POST"])
+def activate_recurring_schedule(schedule_id):
+    """Reactivate a deactivated schedule."""
+    import recurring_tasks
+
+    success = recurring_tasks.activate_schedule(schedule_id)
+
+    return jsonify({
+        "ok": success,
+        "message": "Schedule activated" if success else "Schedule not found"
+    })
+
+
+@app.route("/api/recurring/generate", methods=["POST"])
+def trigger_task_generation():
+    """Manually trigger recurring task generation."""
+    import recurring_tasks
+
+    result = recurring_tasks.generate_due_tasks()
+
+    return jsonify({
+        "ok": True,
+        "result": result
+    })
+
+
+@app.route("/api/recurring/due", methods=["GET"])
+def get_due_schedules():
+    """Get schedules that are currently due for generation."""
+    import recurring_tasks
+
+    due = recurring_tasks.get_due_schedules()
+
+    return jsonify({
+        "ok": True,
+        "count": len(due),
+        "schedules": due
+    })
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 4000))
     logger.info(f"Starting Project Manager Agent on port {port}")

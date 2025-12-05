@@ -122,3 +122,38 @@ LOG_CONFIG = {
     "max_log_size_mb": 10,
     "keep_logs_days": 30,
 }
+
+# ============================================
+# EMAIL MONITOR SETTINGS (Phase 4)
+# ============================================
+
+EMAIL_SCAN_CONFIG = {
+    "enabled": True,
+    "hours_lookback": 24,
+    "max_emails_per_scan": 50,
+    "docs_base_path": "./pm-docs",
+    "scan_times": ["09:00", "15:00"],
+}
+
+# Keywords indicating blocker resolution
+RESOLUTION_KEYWORDS = [
+    "attached", "here is", "completed", "finished",
+    "done", "ready", "sent", "enclosed", "please find"
+]
+
+# Keywords indicating need for more info (escalation)
+ESCALATION_KEYWORDS = [
+    "need more", "additional", "question", "clarify",
+    "missing", "waiting", "require", "please provide"
+]
+
+# Patterns to ignore (spam/newsletters)
+IGNORE_PATTERNS = [
+    "unsubscribe", "no-reply@", "noreply@", "newsletter",
+    "marketing", "automated message"
+]
+
+# Keywords for project relevance scoring
+RELEVANCE_KEYWORDS = [
+    "project", "quote", "invoice", "receipt", "proposal", "contract"
+]

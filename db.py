@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 DB_PATH = Path(__file__).parent / "agent.db"
-SCHEMA_VERSION = 2  # Bump when schema changes
+SCHEMA_VERSION = 3  # Bump when schema changes - v3: Added email_scan_log and email_attachments tables
 
 
 def get_connection() -> sqlite3.Connection:
@@ -448,6 +448,63 @@ def init_db():
     """)
 
     # ============================================
+    # EMAIL MONITOR TABLES (Phase 4)
+    # ============================================
+
+    # Email Scan Log - track processed emails to avoid duplicates
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS email_scan_log (
+            id TEXT PRIMARY KEY,
+            gmail_message_id TEXT UNIQUE NOT NULL,
+            gmail_thread_id TEXT,
+
+            -- Email metadata
+            from_address TEXT,
+            from_name TEXT,
+            subject TEXT,
+            received_at TEXT,
+
+            -- Classification
+            classification TEXT CHECK (classification IN (
+                'blocker_match', 'project_relevant', 'attachment', 'ignore'
+            )),
+            matched_blocker_id TEXT REFERENCES blockers(id),
+            matched_project_id TEXT REFERENCES projects(id),
+
+            -- Processing
+            processed_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            has_attachment INTEGER DEFAULT 0,
+            attachment_downloaded INTEGER DEFAULT 0,
+            notification_sent INTEGER DEFAULT 0,
+
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # Email Attachments - track downloaded files
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS email_attachments (
+            id TEXT PRIMARY KEY,
+            email_scan_log_id TEXT REFERENCES email_scan_log(id),
+            document_id TEXT REFERENCES documents(id),
+
+            gmail_attachment_id TEXT,
+            filename TEXT NOT NULL,
+            mime_type TEXT,
+            file_size_bytes INTEGER,
+
+            local_path TEXT,
+            download_status TEXT CHECK (download_status IN ('pending', 'downloaded', 'failed')),
+            download_error TEXT,
+
+            blocker_id TEXT REFERENCES blockers(id),
+            project_id TEXT REFERENCES projects(id),
+
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # ============================================
     # INDEXES
     # ============================================
 
@@ -480,6 +537,12 @@ def init_db():
 
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_notifications_priority ON notification_queue(priority, scheduled_for)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_notification_dedup_type ON notification_dedup(notification_type, source_id)")
+
+    # Email monitor indexes (Phase 4)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_email_scan_gmail_id ON email_scan_log(gmail_message_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_email_scan_processed ON email_scan_log(processed_at)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_email_attach_email ON email_attachments(email_scan_log_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_email_attach_blocker ON email_attachments(blocker_id)")
 
     # Update schema version
     if current_version < SCHEMA_VERSION:
@@ -1438,6 +1501,210 @@ def update_dedup(notification_type: str, source_id: str) -> None:
 
     conn.commit()
     conn.close()
+
+
+# ============================================
+# EMAIL MONITOR FUNCTIONS (Phase 4)
+# ============================================
+
+def get_email_scan_log(gmail_message_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Get an email scan log entry by Gmail message ID.
+
+    Args:
+        gmail_message_id: The Gmail message ID
+
+    Returns:
+        Email scan log dict or None if not found
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT * FROM email_scan_log WHERE gmail_message_id = ?",
+        (gmail_message_id,)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def create_email_scan_log(
+    gmail_message_id: str,
+    gmail_thread_id: str = None,
+    from_address: str = None,
+    from_name: str = None,
+    subject: str = None,
+    classification: str = 'ignore',
+    received_at: str = None,
+    matched_blocker_id: str = None,
+    matched_project_id: str = None,
+    has_attachment: bool = False,
+    notification_sent: bool = False
+) -> Dict[str, Any]:
+    """
+    Create an email scan log entry.
+
+    Args:
+        gmail_message_id: Gmail message ID (required, unique)
+        gmail_thread_id: Gmail thread ID
+        from_address: Sender email address
+        from_name: Sender display name
+        subject: Email subject
+        classification: One of 'blocker_match', 'project_relevant', 'attachment', 'ignore'
+        received_at: When email was received
+        matched_blocker_id: ID of matched blocker (if any)
+        matched_project_id: ID of matched project (if any)
+        has_attachment: Whether email has attachments
+        notification_sent: Whether notification was queued
+
+    Returns:
+        Created email scan log dict
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    log_id = generate_id()
+    cursor.execute("""
+        INSERT INTO email_scan_log (
+            id, gmail_message_id, gmail_thread_id, from_address, from_name,
+            subject, classification, received_at, matched_blocker_id,
+            matched_project_id, has_attachment, notification_sent
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        log_id, gmail_message_id, gmail_thread_id, from_address, from_name,
+        subject, classification, received_at, matched_blocker_id,
+        matched_project_id, 1 if has_attachment else 0, 1 if notification_sent else 0
+    ))
+
+    conn.commit()
+    conn.close()
+
+    return {
+        "id": log_id,
+        "gmail_message_id": gmail_message_id,
+        "classification": classification,
+        "matched_blocker_id": matched_blocker_id,
+        "matched_project_id": matched_project_id
+    }
+
+
+def get_recent_email_scans(limit: int = 50) -> List[Dict[str, Any]]:
+    """
+    Get recent email scan log entries.
+
+    Args:
+        limit: Maximum number of entries to return
+
+    Returns:
+        List of email scan log dicts, newest first
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT * FROM email_scan_log ORDER BY processed_at DESC LIMIT ?",
+        (limit,)
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def create_email_attachment(
+    email_scan_log_id: str,
+    gmail_attachment_id: str,
+    filename: str,
+    local_path: str = None,
+    document_id: str = None,
+    mime_type: str = None,
+    file_size_bytes: int = None,
+    download_status: str = 'pending',
+    download_error: str = None,
+    blocker_id: str = None,
+    project_id: str = None
+) -> Dict[str, Any]:
+    """
+    Create an email attachment record.
+
+    Args:
+        email_scan_log_id: ID of parent email scan log entry
+        gmail_attachment_id: Gmail attachment ID
+        filename: Original filename
+        local_path: Path where file was saved
+        document_id: ID of linked document record (if any)
+        mime_type: MIME type of attachment
+        file_size_bytes: Size in bytes
+        download_status: One of 'pending', 'downloaded', 'failed'
+        download_error: Error message if download failed
+        blocker_id: ID of related blocker
+        project_id: ID of related project
+
+    Returns:
+        Created attachment dict
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    att_id = generate_id()
+    cursor.execute("""
+        INSERT INTO email_attachments (
+            id, email_scan_log_id, gmail_attachment_id, filename, local_path,
+            document_id, mime_type, file_size_bytes, download_status,
+            download_error, blocker_id, project_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        att_id, email_scan_log_id, gmail_attachment_id, filename, local_path,
+        document_id, mime_type, file_size_bytes, download_status,
+        download_error, blocker_id, project_id
+    ))
+
+    conn.commit()
+    conn.close()
+
+    return {
+        "id": att_id,
+        "email_scan_log_id": email_scan_log_id,
+        "filename": filename,
+        "download_status": download_status
+    }
+
+
+def update_email_attachment(
+    attachment_id: str,
+    **kwargs
+) -> Optional[Dict[str, Any]]:
+    """
+    Update an email attachment record.
+
+    Args:
+        attachment_id: ID of attachment to update
+        **kwargs: Fields to update
+
+    Returns:
+        Updated attachment dict or None
+    """
+    if not kwargs:
+        return None
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    sets = []
+    params = []
+    for key, value in kwargs.items():
+        sets.append(f"{key} = ?")
+        params.append(value)
+
+    params.append(attachment_id)
+
+    query = f"UPDATE email_attachments SET {', '.join(sets)} WHERE id = ?"
+    cursor.execute(query, params)
+    conn.commit()
+
+    cursor.execute("SELECT * FROM email_attachments WHERE id = ?", (attachment_id,))
+    row = cursor.fetchone()
+    conn.close()
+
+    return dict(row) if row else None
 
 
 # Initialize on import
