@@ -2,7 +2,8 @@
 """
 Project Manager Agent - Flask Server
 
-Runs on port 4000, receives Telegram webhooks, responds via Grok 4.1.
+Runs on port 4000, receives Telegram webhooks, responds via Grok.
+Uses unified 60K token context with tool-based history retrieval.
 """
 
 import os
@@ -11,18 +12,14 @@ import json
 import logging
 from pathlib import Path
 
-# Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify
 import db
 import grok_client
 import telegram_client
-import task_manager
-import toc_engine
 import memory_manager
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s"
@@ -31,9 +28,6 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# Context window for conversation
-CONTEXT_MESSAGES = 10
-
 
 @app.route("/", methods=["GET"])
 def health():
@@ -41,7 +35,7 @@ def health():
     return jsonify({
         "status": "ok",
         "service": "project-manager-agent",
-        "port": 4000
+        "context_limit": f"{memory_manager.ACTIVE_CONTEXT_TOKENS:,} tokens"
     })
 
 
@@ -49,64 +43,47 @@ def health():
 def webhook():
     """
     Telegram webhook endpoint.
-    Receives updates, processes with Grok, responds.
-    Uses memory_manager for unlimited conversation history.
+    Uses 60K token context with tool-based history retrieval.
     """
     try:
         update = request.get_json()
         logger.info(f"Received update: {json.dumps(update, indent=2)}")
 
-        # Parse the update
         parsed = telegram_client.parse_update(update)
         text = parsed.get("text", "").strip()
         chat_id = parsed.get("chat_id")
         from_user = parsed.get("from_user")
 
         if not text or not chat_id:
-            logger.info("No text or chat_id, ignoring")
             return jsonify({"ok": True})
 
         logger.info(f"Message from {from_user}: {text}")
 
-        # Save user message to memory manager (handles both new and legacy tables)
-        memory_manager.add_message_to_conversation(
-            chat_id=str(chat_id),
-            role="user",
-            content=text,
-            sender_name=from_user
-        )
+        # Save user message
+        memory_manager.add_message(str(chat_id), "user", text, sender_name=from_user)
 
-        # Build context with auto-compaction (handles large conversations)
-        context, compaction_result = memory_manager.build_context_with_auto_compact(
-            chat_id=str(chat_id)
-        )
+        # Build context (up to 60K tokens)
+        context = memory_manager.build_context(str(chat_id))
 
-        if compaction_result and compaction_result.get("compacted", 0) > 0:
-            logger.info(f"Auto-compacted {compaction_result['compacted']} messages, saved {compaction_result['tokens_saved']} tokens")
-
-        # Get response from Grok with full context
+        # Get response with tool support
         try:
-            # context[0] is system message, rest are conversation
-            response = grok_client.chat(
-                messages=context[1:],  # Skip system, it's handled by chat()
-                system_prompt=context[0]["content"]  # Use our built system prompt with summaries
+            response = grok_client.chat_with_tools(
+                messages=context,
+                tools=memory_manager.MEMORY_TOOLS,
+                tool_executor=memory_manager.execute_tool,
+                chat_id=str(chat_id)
             )
             logger.info(f"Grok response: {response[:100]}...")
         except Exception as e:
             logger.error(f"Grok error: {e}")
             response = f"Sorry, I encountered an error: {str(e)}"
 
-        # Save assistant response to memory manager
-        memory_manager.add_message_to_conversation(
-            chat_id=str(chat_id),
-            role="assistant",
-            content=response
-        )
+        # Save assistant response
+        memory_manager.add_message(str(chat_id), "assistant", response)
 
-        # Send response to Telegram
+        # Send to Telegram
         try:
             telegram_client.send_message(response, chat_id)
-            logger.info("Response sent to Telegram")
         except Exception as e:
             logger.error(f"Telegram send error: {e}")
 
@@ -119,10 +96,7 @@ def webhook():
 
 @app.route("/send", methods=["POST"])
 def send():
-    """
-    Manual send endpoint (for testing).
-    POST {"message": "text", "chat_id": optional}
-    """
+    """Manual send endpoint."""
     try:
         data = request.get_json()
         message = data.get("message")
@@ -133,7 +107,6 @@ def send():
 
         result = telegram_client.send_message(message, chat_id)
         return jsonify({"ok": True, "result": result})
-
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
@@ -141,14 +114,12 @@ def send():
 @app.route("/history", methods=["GET"])
 def history():
     """Get conversation history."""
-    limit = request.args.get("limit", 20, type=int)
     chat_id = request.args.get("chat_id")
+    limit = request.args.get("limit", 50, type=int)
 
     if chat_id:
-        # Use memory manager for chat-specific history
-        messages = memory_manager.get_recent_conversation_messages(str(chat_id), limit=limit)
+        messages = memory_manager.get_extended_context(chat_id, count=limit)
     else:
-        # Fall back to legacy for all messages
         messages = db.get_recent_messages(limit=limit)
 
     return jsonify({"messages": messages})
@@ -156,31 +127,13 @@ def history():
 
 @app.route("/memory/stats", methods=["GET"])
 def memory_stats():
-    """Get memory usage statistics for a conversation."""
+    """Get memory statistics."""
     chat_id = request.args.get("chat_id")
-
     if not chat_id:
         return jsonify({"error": "chat_id required"}), 400
 
-    stats = memory_manager.get_memory_stats(str(chat_id))
+    stats = memory_manager.get_stats(str(chat_id))
     return jsonify(stats)
-
-
-@app.route("/memory/compact", methods=["POST"])
-def memory_compact():
-    """Force compaction of a conversation."""
-    try:
-        data = request.get_json() or {}
-        chat_id = data.get("chat_id")
-
-        if not chat_id:
-            return jsonify({"error": "chat_id required"}), 400
-
-        result = memory_manager.compact_conversation(str(chat_id))
-        return jsonify({"ok": True, "result": result})
-
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/memory/search", methods=["GET"])
@@ -194,12 +147,7 @@ def memory_search():
         return jsonify({"error": "chat_id and q required"}), 400
 
     messages = memory_manager.search_history(query, str(chat_id), limit=limit)
-    summaries = memory_manager.search_summaries(query, str(chat_id), limit=3)
-
-    return jsonify({
-        "messages": messages,
-        "summaries": summaries
-    })
+    return jsonify({"messages": messages})
 
 
 @app.route("/clear", methods=["POST"])
@@ -211,20 +159,14 @@ def clear():
 
 @app.route("/webhook/set", methods=["POST"])
 def set_webhook():
-    """
-    Set Telegram webhook URL.
-    POST {"url": "https://your-ngrok-url.ngrok.io/webhook"}
-    """
+    """Set Telegram webhook URL."""
     try:
         data = request.get_json()
         url = data.get("url")
-
         if not url:
             return jsonify({"error": "url required"}), 400
-
         result = telegram_client.set_webhook(url)
         return jsonify(result)
-
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
@@ -233,8 +175,7 @@ def set_webhook():
 def webhook_info():
     """Get current webhook info."""
     try:
-        result = telegram_client.get_webhook_info()
-        return jsonify(result)
+        return jsonify(telegram_client.get_webhook_info())
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -243,8 +184,7 @@ def webhook_info():
 def delete_webhook():
     """Delete current webhook."""
     try:
-        result = telegram_client.delete_webhook()
-        return jsonify(result)
+        return jsonify(telegram_client.delete_webhook())
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
@@ -252,16 +192,6 @@ def delete_webhook():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 4000))
     logger.info(f"Starting Project Manager Agent on port {port}")
-    logger.info("Endpoints:")
-    logger.info("  GET  /              - Health check")
-    logger.info("  POST /webhook       - Telegram webhook")
-    logger.info("  POST /send          - Manual send")
-    logger.info("  GET  /history       - View history (?chat_id=&limit=)")
-    logger.info("  POST /clear         - Clear history")
-    logger.info("  POST /webhook/set   - Set webhook URL")
-    logger.info("  GET  /webhook/info  - Get webhook info")
-    logger.info("Memory Management:")
-    logger.info("  GET  /memory/stats  - Memory usage stats (?chat_id=)")
-    logger.info("  POST /memory/compact - Force compaction")
-    logger.info("  GET  /memory/search - Search history (?chat_id=&q=)")
+    logger.info(f"Context limit: {memory_manager.ACTIVE_CONTEXT_TOKENS:,} tokens")
+    logger.info("Endpoints: /, /webhook, /send, /history, /memory/stats, /memory/search")
     app.run(host="0.0.0.0", port=port, debug=False)

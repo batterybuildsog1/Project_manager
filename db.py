@@ -436,6 +436,17 @@ def init_db():
         )
     """)
 
+    # Notification Deduplication - prevents repeat notifications
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS notification_dedup (
+            id TEXT PRIMARY KEY,
+            notification_type TEXT NOT NULL,
+            source_id TEXT,
+            last_sent_at TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
     # ============================================
     # INDEXES
     # ============================================
@@ -458,7 +469,9 @@ def init_db():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_chunks_document ON document_chunks(document_id)")
 
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_conversations_project ON conversations(project_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_conversations_external ON conversations(external_id, source)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_conv_messages_conversation ON conversation_messages(conversation_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_conv_messages_date ON conversation_messages(conversation_id, created_at)")
 
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_blockers_task ON blockers(task_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_blockers_resolved ON blockers(resolved_at)")
@@ -466,6 +479,7 @@ def init_db():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_recurring_next_due ON recurring_schedules(next_due_date) WHERE is_active = 1")
 
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_notifications_priority ON notification_queue(priority, scheduled_for)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_notification_dedup_type ON notification_dedup(notification_type, source_id)")
 
     # Update schema version
     if current_version < SCHEMA_VERSION:
@@ -1284,6 +1298,146 @@ def update_action_status(
     affected = cursor.rowcount
     conn.close()
     return affected > 0
+
+
+# ============================================
+# NOTIFICATION HELPER FUNCTIONS
+# ============================================
+
+def get_tasks_due_within(hours: int, status_not: str = None) -> List[Dict[str, Any]]:
+    """
+    Get tasks due within specified hours.
+
+    Args:
+        hours: Hours from now
+        status_not: Exclude tasks with this status
+
+    Returns:
+        List of task dicts
+    """
+    from datetime import timedelta
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cutoff = (datetime.now(timezone.utc) + timedelta(hours=hours)).isoformat()
+
+    if status_not:
+        cursor.execute("""
+            SELECT * FROM tasks
+            WHERE due_date IS NOT NULL
+              AND due_date <= ?
+              AND status != ?
+            ORDER BY due_date ASC
+        """, (cutoff, status_not))
+    else:
+        cursor.execute("""
+            SELECT * FROM tasks
+            WHERE due_date IS NOT NULL
+              AND due_date <= ?
+            ORDER BY due_date ASC
+        """, (cutoff,))
+
+    results = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    return results
+
+
+def get_blockers_filtered(resolved: bool = None) -> List[Dict[str, Any]]:
+    """
+    Get blockers, optionally filtered by resolved status.
+
+    Args:
+        resolved: True for resolved, False for active, None for all
+
+    Returns:
+        List of blocker dicts
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    if resolved is None:
+        cursor.execute("SELECT * FROM blockers ORDER BY created_at DESC")
+    elif resolved:
+        cursor.execute("SELECT * FROM blockers WHERE resolved_at IS NOT NULL ORDER BY resolved_at DESC")
+    else:
+        cursor.execute("SELECT * FROM blockers WHERE resolved_at IS NULL ORDER BY created_at DESC")
+
+    results = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    return results
+
+
+def get_full_kit_items(task_id: str) -> List[Dict[str, Any]]:
+    """
+    Get full kit items for a task (alias for get_full_kit).
+
+    Args:
+        task_id: Task ID
+
+    Returns:
+        List of full kit item dicts
+    """
+    return get_full_kit(task_id)
+
+
+def check_dedup(notification_type: str, source_id: str, window_hours: float) -> bool:
+    """
+    Check if notification was sent within dedup window.
+
+    Args:
+        notification_type: Type of notification
+        source_id: Related entity ID
+        window_hours: Hours to look back
+
+    Returns:
+        True if duplicate (should skip), False if ok to send
+    """
+    from datetime import timedelta
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=window_hours)).isoformat()
+
+    cursor.execute("""
+        SELECT last_sent_at FROM notification_dedup
+        WHERE notification_type = ? AND (source_id = ? OR (source_id IS NULL AND ? IS NULL))
+        ORDER BY last_sent_at DESC LIMIT 1
+    """, (notification_type, source_id, source_id))
+
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row:
+        return False
+
+    last_sent = row["last_sent_at"]
+    return last_sent > cutoff
+
+
+def update_dedup(notification_type: str, source_id: str) -> None:
+    """
+    Update deduplication tracking.
+
+    Args:
+        notification_type: Type of notification
+        source_id: Related entity ID
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    dedup_id = generate_id()
+    now = datetime.now(timezone.utc).isoformat()
+
+    cursor.execute("""
+        INSERT OR REPLACE INTO notification_dedup
+        (id, notification_type, source_id, last_sent_at)
+        VALUES (?, ?, ?, ?)
+    """, (dedup_id, notification_type, source_id, now))
+
+    conn.commit()
+    conn.close()
 
 
 # Initialize on import
