@@ -41,10 +41,7 @@ def health():
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    """
-    Telegram webhook endpoint.
-    Uses 60K token context with tool-based history retrieval.
-    """
+    """Telegram webhook endpoint."""
     try:
         update = request.get_json()
         logger.info(f"Received update: {json.dumps(update, indent=2)}")
@@ -60,7 +57,7 @@ def webhook():
         logger.info(f"Message from {from_user}: {text}")
 
         # Save user message
-        memory_manager.add_message(str(chat_id), "user", text, sender_name=from_user)
+        memory_manager.add_message(str(chat_id), "user", text)
 
         # Build context (up to 60K tokens)
         context = memory_manager.build_context(str(chat_id))
@@ -128,25 +125,22 @@ def history():
 @app.route("/memory/stats", methods=["GET"])
 def memory_stats():
     """Get memory statistics."""
-    chat_id = request.args.get("chat_id")
-    if not chat_id:
-        return jsonify({"error": "chat_id required"}), 400
-
-    stats = memory_manager.get_stats(str(chat_id))
+    chat_id = request.args.get("chat_id", "")
+    stats = memory_manager.get_stats(chat_id)
     return jsonify(stats)
 
 
 @app.route("/memory/search", methods=["GET"])
 def memory_search():
     """Search conversation history."""
-    chat_id = request.args.get("chat_id")
+    chat_id = request.args.get("chat_id", "")
     query = request.args.get("q")
     limit = request.args.get("limit", 5, type=int)
 
-    if not chat_id or not query:
-        return jsonify({"error": "chat_id and q required"}), 400
+    if not query:
+        return jsonify({"error": "q required"}), 400
 
-    messages = memory_manager.search_history(query, str(chat_id), limit=limit)
+    messages = memory_manager.search_history(query, chat_id, limit=limit)
     return jsonify({"messages": messages})
 
 
@@ -193,5 +187,4 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 4000))
     logger.info(f"Starting Project Manager Agent on port {port}")
     logger.info(f"Context limit: {memory_manager.ACTIVE_CONTEXT_TOKENS:,} tokens")
-    logger.info("Endpoints: /, /webhook, /send, /history, /memory/stats, /memory/search")
     app.run(host="0.0.0.0", port=port, debug=False)
