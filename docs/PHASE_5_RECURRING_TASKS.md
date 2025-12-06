@@ -15,37 +15,53 @@ Build a recurring task system that automatically generates tasks from schedules.
 
 ---
 
-## Existing Database Schema (in db.py)
+## Database Schema (in db.py)
 
-The `recurring_schedules` table already exists:
+The `recurring_schedules` table schema:
 
 ```sql
 CREATE TABLE IF NOT EXISTS recurring_schedules (
     id TEXT PRIMARY KEY,
-    project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
-    title TEXT NOT NULL,
+    project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+
+    name TEXT NOT NULL,
     description TEXT,
-    frequency TEXT NOT NULL,  -- 'daily', 'weekly', 'monthly', 'yearly', 'custom'
-    cron_pattern TEXT,        -- For custom: '0 9 15 * *' (9am on 15th)
-    day_of_week INTEGER,      -- 0=Mon, 6=Sun (for weekly)
-    day_of_month INTEGER,     -- 1-31 (for monthly)
-    month_of_year INTEGER,    -- 1-12 (for yearly)
-    time_of_day TEXT,         -- HH:MM format
-    next_due_date TEXT,       -- When next task should be generated
-    last_generated TEXT,      -- When we last created a task
-    estimated_hours REAL DEFAULT 1.0,
-    priority INTEGER DEFAULT 3,
-    default_assignee TEXT,
+
+    frequency TEXT NOT NULL
+        CHECK (frequency IN ('daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'yearly', 'custom')),
+
+    -- Scheduling fields
+    cron_pattern TEXT,            -- For custom: '0 9 15 * *' (minute hour day month dow)
+    day_of_week TEXT,             -- 0=Mon, 6=Sun (comma-separated for multiple)
+    day_of_month TEXT,            -- 1-31 (comma-separated for multiple)
+    month_of_year TEXT,           -- 1-12 (comma-separated for multiple)
+    time_of_day TEXT DEFAULT '09:00',  -- HH:MM format
+
+    -- Task template fields
+    task_title_template TEXT NOT NULL,
+    task_description_template TEXT,
+    estimated_hours REAL,
+    priority INTEGER DEFAULT 3,   -- Priority for generated tasks (1-5)
+
+    expected_document_type TEXT,
+
+    start_date TEXT NOT NULL,
+    end_date TEXT,
+
+    last_generated_date TEXT,
+    next_due_date TEXT,
+
     is_active INTEGER DEFAULT 1,
+
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 ```
 
-**Existing db.py functions**:
-- `create_recurring_schedule()`
-- `get_recurring_schedule()`
-- `list_recurring_schedules()`
+**db.py functions**:
+- `create_recurring_schedule()` - Creates with all fields including cron_pattern, time_of_day, priority
+- `get_recurring_schedule()` - Get by ID
+- `list_recurring_schedules()` - List with active_only filter
 
 ---
 
@@ -725,8 +741,7 @@ create_schedule(
 
 ## Notes for Agent
 
-1. **DO NOT modify `db.py`** - All needed functions exist
-2. **DO NOT modify `task_manager.py`** - Import and use only
+1. **Schema was updated in db.py** - Added cron_pattern, time_of_day, priority columns
+2. **Use db.create_recurring_schedule()** - Accepts all scheduling fields
 3. **Add endpoints to server.py in a clearly marked section**
-4. **Use existing db.create_recurring_schedule()** - Don't recreate
-5. **Test with**: `python3 -c "import recurring_tasks"`
+4. **Test with**: `python3 -c "import recurring_tasks"` and `python3 recurring_tasks.py`

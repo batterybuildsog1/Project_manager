@@ -2,12 +2,13 @@
 """
 Recurring Tasks Generator for Project Manager Agent.
 
-Generates tasks from recurring schedules based on frequency patterns.
+Generates tasks from recurring schedules based on cron-like patterns.
 Designed to run daily at midnight via scheduler.
 
-Adapts to existing schema which uses:
-- name, task_title_template, frequency, start_date
-- day_of_week, day_of_month, month_of_year (as TEXT)
+Supports:
+- Simple frequencies: daily, weekly, biweekly, monthly, quarterly, yearly
+- Custom cron patterns: "0 9 15 * *" (minute hour day month dow)
+- Configurable time_of_day for simple frequencies
 """
 
 import logging
@@ -18,6 +19,91 @@ from calendar import monthrange
 import db
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================
+# CRON PATTERN PARSING
+# ============================================
+
+def parse_cron_pattern(pattern: str) -> Dict[str, Any]:
+    """
+    Parse a cron-like pattern.
+
+    Format: minute hour day_of_month month day_of_week
+    Example: "0 9 15 * *" = 9:00am on the 15th of every month
+
+    Supports:
+    - * = any value
+    - number = specific value
+    - */n = every n units
+    - n,m = multiple values
+
+    Args:
+        pattern: Cron pattern string
+
+    Returns:
+        Parsed components dict
+
+    Raises:
+        ValueError: If pattern is invalid
+    """
+    parts = pattern.strip().split()
+    if len(parts) != 5:
+        raise ValueError(f"Invalid cron pattern: {pattern}. Expected 5 parts.")
+
+    def parse_field(field: str, min_val: int, max_val: int) -> List[int]:
+        if field == "*":
+            return list(range(min_val, max_val + 1))
+        elif field.startswith("*/"):
+            step = int(field[2:])
+            return list(range(min_val, max_val + 1, step))
+        elif "," in field:
+            return [int(x) for x in field.split(",")]
+        else:
+            return [int(field)]
+
+    return {
+        "minutes": parse_field(parts[0], 0, 59),
+        "hours": parse_field(parts[1], 0, 23),
+        "days_of_month": parse_field(parts[2], 1, 31),
+        "months": parse_field(parts[3], 1, 12),
+        "days_of_week": parse_field(parts[4], 0, 6)  # 0=Mon, 6=Sun
+    }
+
+
+def get_next_occurrence_from_cron(pattern: str, after: datetime = None) -> datetime:
+    """
+    Calculate next occurrence from cron pattern.
+
+    Args:
+        pattern: Cron pattern string
+        after: Start searching after this time (default: now)
+
+    Returns:
+        Next occurrence datetime
+
+    Raises:
+        ValueError: If no occurrence found within a year
+    """
+    if after is None:
+        after = datetime.now()
+
+    parsed = parse_cron_pattern(pattern)
+
+    # Start from the next minute
+    candidate = after.replace(second=0, microsecond=0) + timedelta(minutes=1)
+
+    # Iterate up to 366 days to find match
+    for _ in range(366 * 24 * 60):  # Max iterations
+        if (candidate.minute in parsed["minutes"] and
+            candidate.hour in parsed["hours"] and
+            candidate.day in parsed["days_of_month"] and
+            candidate.month in parsed["months"] and
+            candidate.weekday() in parsed["days_of_week"]):
+            return candidate
+        candidate += timedelta(minutes=1)
+
+    raise ValueError(f"Could not find next occurrence for pattern: {pattern}")
 
 
 # ============================================
@@ -42,6 +128,25 @@ def parse_day_field(field: str) -> List[int]:
         return []
 
 
+def parse_time_of_day(time_str: str) -> tuple:
+    """
+    Parse time_of_day string to (hour, minute).
+
+    Args:
+        time_str: String like "09:00" or "14:30"
+
+    Returns:
+        Tuple of (hour, minute)
+    """
+    if not time_str:
+        return (9, 0)
+    try:
+        parts = time_str.split(":")
+        return (int(parts[0]), int(parts[1]) if len(parts) > 1 else 0)
+    except (ValueError, AttributeError, IndexError):
+        return (9, 0)
+
+
 def get_next_occurrence(schedule: Dict, after: datetime = None) -> datetime:
     """
     Calculate next occurrence for a schedule.
@@ -58,8 +163,12 @@ def get_next_occurrence(schedule: Dict, after: datetime = None) -> datetime:
 
     frequency = schedule.get("frequency", "monthly")
 
-    # Default time is 9:00 AM
-    hour, minute = 9, 0
+    # Handle custom cron pattern first
+    if frequency == "custom" and schedule.get("cron_pattern"):
+        return get_next_occurrence_from_cron(schedule["cron_pattern"], after)
+
+    # Parse time of day
+    hour, minute = parse_time_of_day(schedule.get("time_of_day"))
 
     # Parse schedule fields
     days_of_week = parse_day_field(schedule.get("day_of_week"))
@@ -67,7 +176,7 @@ def get_next_occurrence(schedule: Dict, after: datetime = None) -> datetime:
     months_of_year = parse_day_field(schedule.get("month_of_year"))
 
     if frequency == "daily":
-        # Tomorrow at 9am
+        # Next day at specified time
         next_date = after.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if next_date <= after:
             next_date += timedelta(days=1)
@@ -173,7 +282,7 @@ def get_next_occurrence(schedule: Dict, after: datetime = None) -> datetime:
         return next_date
 
     else:
-        # Default: tomorrow
+        # Default: tomorrow at specified time
         return after.replace(hour=hour, minute=minute, second=0, microsecond=0) + timedelta(days=1)
 
 
@@ -198,6 +307,10 @@ def create_task_from_schedule(schedule: Dict) -> Dict[str, Any]:
     title = schedule.get("task_title_template") or schedule.get("name", "Recurring Task")
     description = schedule.get("task_description_template") or schedule.get("description")
 
+    # Get priority (default 3 maps to task priority 50, scale 1-5 to 10-90)
+    schedule_priority = schedule.get("priority", 3)
+    task_priority = schedule_priority * 20 - 10  # 1->10, 2->30, 3->50, 4->70, 5->90
+
     # Create task using db.create_task directly
     task = db.create_task(
         project_id=schedule.get("project_id"),
@@ -205,7 +318,7 @@ def create_task_from_schedule(schedule: Dict) -> Dict[str, Any]:
         description=description or f"Auto-generated from recurring schedule: {schedule.get('name')}",
         estimated_hours=schedule.get("estimated_hours"),
         due_date=due_date.isoformat(),
-        priority=50  # Default priority
+        priority=task_priority
     )
 
     # Link to recurring schedule
@@ -218,7 +331,7 @@ def create_task_from_schedule(schedule: Dict) -> Dict[str, Any]:
     conn.commit()
     conn.close()
 
-    logger.info(f"Created task '{task['title']}' from schedule '{schedule['name']}' due {due_date}")
+    logger.info(f"Created task '{task['title']}' from schedule '{schedule.get('name')}' due {due_date}")
 
     return task
 
@@ -342,11 +455,14 @@ def create_schedule(
     task_title_template: str = None,
     project_id: str = None,
     description: str = None,
+    cron_pattern: str = None,
     day_of_week: str = None,
     day_of_month: str = None,
     month_of_year: str = None,
+    time_of_day: str = "09:00",
     task_description_template: str = None,
     estimated_hours: float = None,
+    priority: int = 3,
     start_date: str = None,
     end_date: str = None
 ) -> Dict[str, Any]:
@@ -355,15 +471,18 @@ def create_schedule(
 
     Args:
         name: Schedule name
-        frequency: 'daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'yearly'
-        task_title_template: Template for generated task titles
+        frequency: 'daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'yearly', 'custom'
+        task_title_template: Template for generated task titles (defaults to name)
         project_id: Optional project to link tasks to
         description: Schedule description
+        cron_pattern: For custom frequency: 'minute hour day month dow'
         day_of_week: For weekly (0=Mon, 6=Sun), comma-separated
         day_of_month: For monthly/yearly (1-31), comma-separated
         month_of_year: For yearly (1-12), comma-separated
+        time_of_day: HH:MM format (default: 09:00)
         task_description_template: Template for task descriptions
         estimated_hours: Default estimate for generated tasks
+        priority: Priority 1-5 for generated tasks (default: 3)
         start_date: When schedule starts (default: today)
         end_date: Optional end date
 
@@ -376,6 +495,13 @@ def create_schedule(
     if not task_title_template:
         task_title_template = name
 
+    # Validate cron pattern if custom frequency
+    if frequency == "custom":
+        if not cron_pattern:
+            raise ValueError("cron_pattern required for custom frequency")
+        # Validate by parsing
+        parse_cron_pattern(cron_pattern)
+
     schedule = db.create_recurring_schedule(
         name=name,
         task_title_template=task_title_template,
@@ -383,11 +509,14 @@ def create_schedule(
         start_date=start_date,
         project_id=project_id,
         description=description,
+        cron_pattern=cron_pattern,
         day_of_week=day_of_week,
         day_of_month=day_of_month,
         month_of_year=month_of_year,
+        time_of_day=time_of_day,
         task_description_template=task_description_template,
-        estimated_hours=estimated_hours
+        estimated_hours=estimated_hours,
+        priority=priority
     )
 
     # Set initial next_due_date
@@ -460,6 +589,10 @@ def update_schedule(schedule_id: str, **kwargs) -> Optional[Dict]:
     if not kwargs:
         return get_schedule(schedule_id)
 
+    # Validate cron pattern if being updated
+    if kwargs.get("cron_pattern"):
+        parse_cron_pattern(kwargs["cron_pattern"])
+
     conn = db.get_connection()
     cursor = conn.cursor()
 
@@ -479,7 +612,9 @@ def update_schedule(schedule_id: str, **kwargs) -> Optional[Dict]:
 
     # Recalculate next_due_date if frequency-related fields changed
     schedule = get_schedule(schedule_id)
-    if schedule and any(k in kwargs for k in ['frequency', 'day_of_week', 'day_of_month', 'month_of_year']):
+    recalc_fields = ['frequency', 'cron_pattern', 'day_of_week', 'day_of_month',
+                     'month_of_year', 'time_of_day']
+    if schedule and any(k in kwargs for k in recalc_fields):
         next_due = get_next_occurrence(schedule)
         conn = db.get_connection()
         cursor = conn.cursor()
@@ -526,37 +661,74 @@ def get_tasks_for_schedule(schedule_id: str, limit: int = 10) -> List[Dict]:
 if __name__ == "__main__":
     print("Testing recurring_tasks...")
 
-    # Test frequency calculation
-    test_schedule_monthly = {
+    # Test cron parsing
+    print("\n1. Testing cron pattern parsing:")
+    parsed = parse_cron_pattern("0 9 15 * *")
+    print(f"   Parsed '0 9 15 * *': minutes={parsed['minutes'][:3]}..., hours={parsed['hours']}, days={parsed['days_of_month']}")
+    assert 0 in parsed["minutes"]
+    assert 9 in parsed["hours"]
+    assert 15 in parsed["days_of_month"]
+
+    # Test cron with step
+    parsed_step = parse_cron_pattern("*/15 * * * *")
+    print(f"   Parsed '*/15 * * * *': minutes={parsed_step['minutes']}")
+    assert 0 in parsed_step["minutes"]
+    assert 15 in parsed_step["minutes"]
+    assert 30 in parsed_step["minutes"]
+
+    # Test frequency calculations
+    print("\n2. Testing frequency calculations:")
+
+    test_monthly = {
         "frequency": "monthly",
         "day_of_month": "15",
-        "start_date": "2024-01-01"
+        "time_of_day": "09:00"
     }
-    next_occ = get_next_occurrence(test_schedule_monthly)
-    print(f"  Next monthly (15th): {next_occ}")
+    next_occ = get_next_occurrence(test_monthly)
+    print(f"   Next monthly (15th at 9am): {next_occ}")
+    assert next_occ.hour == 9
+    assert next_occ.day == 15
 
-    test_schedule_weekly = {
+    test_weekly = {
         "frequency": "weekly",
         "day_of_week": "0",  # Monday
-        "start_date": "2024-01-01"
+        "time_of_day": "10:00"
     }
-    next_weekly = get_next_occurrence(test_schedule_weekly)
-    print(f"  Next weekly (Monday): {next_weekly}")
+    next_weekly = get_next_occurrence(test_weekly)
+    print(f"   Next weekly (Monday at 10am): {next_weekly}")
+    assert next_weekly.weekday() == 0
+    assert next_weekly.hour == 10
 
-    test_schedule_daily = {
+    test_daily = {
         "frequency": "daily",
-        "start_date": "2024-01-01"
+        "time_of_day": "08:45"
     }
-    next_daily = get_next_occurrence(test_schedule_daily)
-    print(f"  Next daily: {next_daily}")
+    next_daily = get_next_occurrence(test_daily)
+    print(f"   Next daily (8:45am): {next_daily}")
+    assert next_daily.hour == 8
+    assert next_daily.minute == 45
 
-    test_schedule_yearly = {
+    test_yearly = {
         "frequency": "yearly",
         "month_of_year": "12",
         "day_of_month": "25",
-        "start_date": "2024-01-01"
+        "time_of_day": "09:00"
     }
-    next_yearly = get_next_occurrence(test_schedule_yearly)
-    print(f"  Next yearly (Dec 25): {next_yearly}")
+    next_yearly = get_next_occurrence(test_yearly)
+    print(f"   Next yearly (Dec 25 at 9am): {next_yearly}")
+    assert next_yearly.month == 12
+    assert next_yearly.day == 25
 
-    print("All tests passed!")
+    # Test custom cron
+    print("\n3. Testing custom cron:")
+    test_custom = {
+        "frequency": "custom",
+        "cron_pattern": "0 9 15 * *"  # 9am on 15th of every month
+    }
+    next_custom = get_next_occurrence(test_custom)
+    print(f"   Next cron '0 9 15 * *': {next_custom}")
+    assert next_custom.hour == 9
+    assert next_custom.minute == 0
+    assert next_custom.day == 15
+
+    print("\nAll tests passed!")

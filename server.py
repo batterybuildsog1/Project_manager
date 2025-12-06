@@ -356,27 +356,40 @@ def create_recurring_schedule():
     if not data.get("name") or not data.get("frequency"):
         return jsonify({"ok": False, "error": "name and frequency required"}), 400
 
-    valid_frequencies = ["daily", "weekly", "biweekly", "monthly", "quarterly", "yearly"]
+    valid_frequencies = ["daily", "weekly", "biweekly", "monthly", "quarterly", "yearly", "custom"]
     if data["frequency"] not in valid_frequencies:
         return jsonify({
             "ok": False,
             "error": f"Invalid frequency. Must be one of: {', '.join(valid_frequencies)}"
         }), 400
 
-    schedule = recurring_tasks.create_schedule(
-        name=data["name"],
-        frequency=data["frequency"],
-        task_title_template=data.get("task_title_template"),
-        project_id=data.get("project_id"),
-        description=data.get("description"),
-        day_of_week=data.get("day_of_week"),
-        day_of_month=data.get("day_of_month"),
-        month_of_year=data.get("month_of_year"),
-        task_description_template=data.get("task_description_template"),
-        estimated_hours=data.get("estimated_hours"),
-        start_date=data.get("start_date"),
-        end_date=data.get("end_date")
-    )
+    # Custom frequency requires cron_pattern
+    if data["frequency"] == "custom" and not data.get("cron_pattern"):
+        return jsonify({
+            "ok": False,
+            "error": "cron_pattern required for custom frequency"
+        }), 400
+
+    try:
+        schedule = recurring_tasks.create_schedule(
+            name=data["name"],
+            frequency=data["frequency"],
+            task_title_template=data.get("task_title_template"),
+            project_id=data.get("project_id"),
+            description=data.get("description"),
+            cron_pattern=data.get("cron_pattern"),
+            day_of_week=data.get("day_of_week"),
+            day_of_month=data.get("day_of_month"),
+            month_of_year=data.get("month_of_year"),
+            time_of_day=data.get("time_of_day", "09:00"),
+            task_description_template=data.get("task_description_template"),
+            estimated_hours=data.get("estimated_hours"),
+            priority=data.get("priority", 3),
+            start_date=data.get("start_date"),
+            end_date=data.get("end_date")
+        )
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
 
     return jsonify({
         "ok": True,
@@ -416,14 +429,17 @@ def update_recurring_schedule(schedule_id):
 
     # Validate frequency if provided
     if "frequency" in data:
-        valid_frequencies = ["daily", "weekly", "biweekly", "monthly", "quarterly", "yearly"]
+        valid_frequencies = ["daily", "weekly", "biweekly", "monthly", "quarterly", "yearly", "custom"]
         if data["frequency"] not in valid_frequencies:
             return jsonify({
                 "ok": False,
                 "error": f"Invalid frequency. Must be one of: {', '.join(valid_frequencies)}"
             }), 400
 
-    schedule = recurring_tasks.update_schedule(schedule_id, **data)
+    try:
+        schedule = recurring_tasks.update_schedule(schedule_id, **data)
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
 
     if not schedule:
         return jsonify({"ok": False, "error": "Schedule not found"}), 404

@@ -330,13 +330,18 @@ def init_db():
             frequency TEXT NOT NULL
                 CHECK (frequency IN ('daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'yearly', 'custom')),
 
-            day_of_week TEXT,
-            day_of_month TEXT,
-            month_of_year TEXT,
+            -- Scheduling fields
+            cron_pattern TEXT,            -- For custom: '0 9 15 * *' (minute hour day month dow)
+            day_of_week TEXT,             -- 0=Mon, 6=Sun (comma-separated for multiple)
+            day_of_month TEXT,            -- 1-31 (comma-separated for multiple)
+            month_of_year TEXT,           -- 1-12 (comma-separated for multiple)
+            time_of_day TEXT DEFAULT '09:00',  -- HH:MM format
 
+            -- Task template fields
             task_title_template TEXT NOT NULL,
             task_description_template TEXT,
             estimated_hours REAL,
+            priority INTEGER DEFAULT 3,   -- Priority for generated tasks (1-5)
 
             expected_document_type TEXT,
 
@@ -1120,17 +1125,21 @@ def create_recurring_schedule(
     cursor.execute("""
         INSERT INTO recurring_schedules (
             id, name, task_title_template, frequency, start_date, project_id,
-            description, day_of_week, day_of_month, month_of_year,
-            task_description_template, estimated_hours, expected_document_type
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            description, cron_pattern, day_of_week, day_of_month, month_of_year,
+            time_of_day, task_description_template, estimated_hours, priority,
+            expected_document_type
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         schedule_id, name, task_title_template, frequency, start_date, project_id,
         kwargs.get('description'),
+        kwargs.get('cron_pattern'),
         kwargs.get('day_of_week'),
         kwargs.get('day_of_month'),
         kwargs.get('month_of_year'),
+        kwargs.get('time_of_day', '09:00'),
         kwargs.get('task_description_template'),
         kwargs.get('estimated_hours'),
+        kwargs.get('priority', 3),
         kwargs.get('expected_document_type')
     ))
 
