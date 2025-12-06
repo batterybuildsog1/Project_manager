@@ -1105,6 +1105,208 @@ def list_documents(
     return [dict(row) for row in rows]
 
 
+def search_documents(
+    project_id: str = None,
+    query: str = None,
+    document_type: str = None,
+    vendor: str = None,
+    category: str = None,
+    date_from: str = None,
+    date_to: str = None,
+    amount_min: float = None,
+    amount_max: float = None,
+    limit: int = 50
+) -> List[Dict[str, Any]]:
+    """
+    Search documents with flexible filtering.
+
+    Args:
+        project_id: Filter by project
+        query: Text search in filename, content_text, vendor, notes
+        document_type: Filter by type (receipt, invoice, etc.)
+        vendor: Filter by vendor (partial match)
+        category: Filter by category
+        date_from: Transaction date >= this
+        date_to: Transaction date <= this
+        amount_min: Amount >= this
+        amount_max: Amount <= this
+        limit: Max results
+
+    Returns:
+        List of matching document dicts
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    sql = "SELECT * FROM documents WHERE 1=1"
+    params = []
+
+    if project_id:
+        sql += " AND project_id = ?"
+        params.append(project_id)
+
+    if document_type:
+        sql += " AND document_type = ?"
+        params.append(document_type)
+
+    if vendor:
+        sql += " AND vendor LIKE ?"
+        params.append(f"%{vendor}%")
+
+    if category:
+        sql += " AND category = ?"
+        params.append(category)
+
+    if date_from:
+        sql += " AND transaction_date >= ?"
+        params.append(date_from)
+
+    if date_to:
+        sql += " AND transaction_date <= ?"
+        params.append(date_to)
+
+    if amount_min is not None:
+        sql += " AND amount >= ?"
+        params.append(amount_min)
+
+    if amount_max is not None:
+        sql += " AND amount <= ?"
+        params.append(amount_max)
+
+    if query:
+        sql += """ AND (
+            filename LIKE ? OR
+            content_text LIKE ? OR
+            vendor LIKE ? OR
+            notes LIKE ? OR
+            content_summary LIKE ?
+        )"""
+        q = f"%{query}%"
+        params.extend([q, q, q, q, q])
+
+    sql += " ORDER BY transaction_date DESC, created_at DESC LIMIT ?"
+    params.append(limit)
+
+    cursor.execute(sql, params)
+    rows = cursor.fetchall()
+    conn.close()
+
+    return [dict(row) for row in rows]
+
+
+def update_document(doc_id: str, **kwargs) -> Optional[Dict[str, Any]]:
+    """
+    Update a document.
+
+    Args:
+        doc_id: Document ID
+        **kwargs: Fields to update (vendor, amount, category, etc.)
+
+    Returns:
+        Updated document dict or None if not found
+    """
+    if not kwargs:
+        return get_document(doc_id)
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # Handle tags specially - convert list to JSON
+    if 'tags' in kwargs and isinstance(kwargs['tags'], list):
+        kwargs['tags'] = json.dumps(kwargs['tags'])
+
+    sets = []
+    params = []
+    for key, value in kwargs.items():
+        sets.append(f"{key} = ?")
+        params.append(value)
+
+    sets.append("updated_at = CURRENT_TIMESTAMP")
+    params.append(doc_id)
+
+    query = f"UPDATE documents SET {', '.join(sets)} WHERE id = ?"
+    cursor.execute(query, params)
+    conn.commit()
+    conn.close()
+
+    return get_document(doc_id)
+
+
+def delete_document(doc_id: str) -> bool:
+    """
+    Delete a document.
+
+    Args:
+        doc_id: Document ID
+
+    Returns:
+        True if deleted, False if not found
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # Delete associated chunks first (cascade should handle, but be explicit)
+    cursor.execute("DELETE FROM document_chunks WHERE document_id = ?", (doc_id,))
+
+    # Delete document
+    cursor.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
+    affected = cursor.rowcount
+
+    conn.commit()
+    conn.close()
+
+    return affected > 0
+
+
+def get_document_stats(project_id: str = None) -> Dict[str, Any]:
+    """
+    Get document statistics.
+
+    Args:
+        project_id: Optional project filter
+
+    Returns:
+        Stats dict with counts by type, total amount, etc.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # Base filter
+    where = "WHERE 1=1"
+    params = []
+    if project_id:
+        where += " AND project_id = ?"
+        params.append(project_id)
+
+    # Total count
+    cursor.execute(f"SELECT COUNT(*) as count FROM documents {where}", params)
+    total = cursor.fetchone()["count"]
+
+    # Count by type
+    cursor.execute(f"""
+        SELECT document_type, COUNT(*) as count
+        FROM documents {where}
+        GROUP BY document_type
+    """, params)
+    by_type = {row["document_type"]: row["count"] for row in cursor.fetchall()}
+
+    # Sum amounts by type (for receipts/invoices)
+    cursor.execute(f"""
+        SELECT document_type, SUM(amount) as total, currency
+        FROM documents {where} AND amount IS NOT NULL
+        GROUP BY document_type, currency
+    """, params)
+    amounts = [dict(row) for row in cursor.fetchall()]
+
+    conn.close()
+
+    return {
+        "total_documents": total,
+        "by_type": by_type,
+        "amounts": amounts
+    }
+
+
 # ============================================
 # RECURRING SCHEDULES
 # ============================================

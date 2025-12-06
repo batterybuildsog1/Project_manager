@@ -503,6 +503,247 @@ def get_due_schedules():
     })
 
 
+# ============================================
+# DOCUMENT MANAGEMENT ENDPOINTS (Phase 6)
+# ============================================
+
+@app.route("/api/documents", methods=["GET"])
+def list_documents_endpoint():
+    """
+    List/search documents.
+
+    Query params:
+        project_id: Filter by project
+        type: Filter by document type
+        q: Text search
+        vendor: Filter by vendor
+        category: Filter by category
+        date_from: Date range start (YYYY-MM-DD)
+        date_to: Date range end (YYYY-MM-DD)
+        amount_min: Minimum amount
+        amount_max: Maximum amount
+        limit: Max results (default 50)
+    """
+    import document_manager
+
+    docs = document_manager.search_documents(
+        project_id=request.args.get("project_id"),
+        query=request.args.get("q"),
+        document_type=request.args.get("type"),
+        vendor=request.args.get("vendor"),
+        category=request.args.get("category"),
+        date_from=request.args.get("date_from"),
+        date_to=request.args.get("date_to"),
+        amount_min=request.args.get("amount_min", type=float),
+        amount_max=request.args.get("amount_max", type=float),
+        limit=request.args.get("limit", 50, type=int)
+    )
+
+    return jsonify({
+        "ok": True,
+        "count": len(docs),
+        "documents": docs
+    })
+
+
+@app.route("/api/documents", methods=["POST"])
+def upload_document_endpoint():
+    """
+    Upload a new document.
+
+    Request body:
+        {
+            "file_path": "/path/to/file",  (required)
+            "project_id": "project_123",
+            "task_id": "task_456",
+            "document_type": "receipt",
+            "metadata": {
+                "vendor": "Amazon",
+                "amount": 29.99,
+                ...
+            }
+        }
+
+    Returns:
+        Document record and extraction request for AI processing
+    """
+    import document_manager
+
+    data = request.get_json() or {}
+
+    if not data.get("file_path"):
+        return jsonify({"ok": False, "error": "file_path required"}), 400
+
+    try:
+        result = document_manager.upload_document(
+            file_path=data["file_path"],
+            project_id=data.get("project_id"),
+            task_id=data.get("task_id"),
+            document_type=data.get("document_type", "other"),
+            copy_file=data.get("copy_file", True),
+            metadata=data.get("metadata")
+        )
+
+        return jsonify({
+            "ok": True,
+            "document": result["document"],
+            "extraction_method": result["extraction_method"],
+            "needs_ai_extraction": result["needs_ai_extraction"],
+            "extraction_request": result.get("extraction_request")
+        })
+
+    except FileNotFoundError as e:
+        return jsonify({"ok": False, "error": str(e)}), 404
+    except Exception as e:
+        logger.error(f"Document upload error: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/documents/<doc_id>", methods=["GET"])
+def get_document_endpoint(doc_id):
+    """Get a specific document by ID."""
+    import document_manager
+
+    doc = document_manager.get_document(doc_id)
+
+    if not doc:
+        return jsonify({"ok": False, "error": "Document not found"}), 404
+
+    return jsonify({
+        "ok": True,
+        "document": doc
+    })
+
+
+@app.route("/api/documents/<doc_id>", methods=["PUT"])
+def update_document_endpoint(doc_id):
+    """
+    Update document metadata.
+
+    Request body:
+        {
+            "vendor": "Updated Vendor",
+            "amount": 99.99,
+            "category": "office",
+            ...
+        }
+    """
+    data = request.get_json() or {}
+
+    if not data:
+        return jsonify({"ok": False, "error": "No data provided"}), 400
+
+    doc = db.update_document(doc_id, **data)
+
+    if not doc:
+        return jsonify({"ok": False, "error": "Document not found"}), 404
+
+    return jsonify({
+        "ok": True,
+        "document": doc
+    })
+
+
+@app.route("/api/documents/<doc_id>", methods=["DELETE"])
+def delete_document_endpoint(doc_id):
+    """
+    Delete a document.
+
+    Query params:
+        delete_file: true/false - also delete physical file
+    """
+    import document_manager
+
+    delete_file = request.args.get("delete_file", "false").lower() == "true"
+
+    success = document_manager.delete_document(doc_id, delete_file=delete_file)
+
+    return jsonify({
+        "ok": success,
+        "message": "Document deleted" if success else "Document not found"
+    })
+
+
+@app.route("/api/documents/<doc_id>/extract", methods=["POST"])
+def extract_document_metadata(doc_id):
+    """
+    Update document with AI-extracted metadata.
+
+    Request body:
+        {
+            "metadata": {
+                "vendor": "Amazon",
+                "total": 29.99,
+                "date": "2024-12-01",
+                ...
+            }
+        }
+
+    This endpoint is called after AI has processed the extraction request.
+    """
+    import document_manager
+
+    data = request.get_json() or {}
+    metadata = data.get("metadata", {})
+
+    if not metadata:
+        return jsonify({"ok": False, "error": "metadata required"}), 400
+
+    doc = document_manager.update_document_metadata(doc_id, metadata)
+
+    if not doc:
+        return jsonify({"ok": False, "error": "Document not found"}), 404
+
+    return jsonify({
+        "ok": True,
+        "document": doc
+    })
+
+
+@app.route("/api/documents/<doc_id>/question", methods=["POST"])
+def ask_document_question(doc_id):
+    """
+    Build a request for asking a question about a document.
+
+    Request body:
+        {"question": "What items are on this receipt?"}
+
+    Returns:
+        Request structure for AI to process (includes doc context)
+    """
+    import document_manager
+
+    data = request.get_json() or {}
+    question = data.get("question")
+
+    if not question:
+        return jsonify({"ok": False, "error": "question required"}), 400
+
+    request_data = document_manager.build_question_request(doc_id, question)
+
+    if not request_data:
+        return jsonify({"ok": False, "error": "Document not found"}), 404
+
+    return jsonify({
+        "ok": True,
+        "request": request_data
+    })
+
+
+@app.route("/api/documents/stats", methods=["GET"])
+def get_document_stats_endpoint():
+    """Get document statistics."""
+    import document_manager
+
+    project_id = request.args.get("project_id")
+    stats = document_manager.get_document_stats(project_id)
+
+    return jsonify({
+        "ok": True,
+        "stats": stats
+    })
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 4000))
     logger.info(f"Starting Project Manager Agent on port {port}")
